@@ -12,16 +12,18 @@ def rand_source(event, SourceType="MT", pressure=None, volume=None):
         event.moment_tensor = mt
     else:
         mt = event.moment_tensor
-
     if SourceType == "MT":
-        source = MTSource(
-            lat=event.lat,
-            lon=event.lon,
-            north_shift=event.north_shift,
-            east_shift=event.east_shift,
-            depth=event.depth,
-            m6=mt.m6(),
-            time=event.time)
+        if event.moment_tensor is None:
+            source = MTSource(
+                lat=event.lat,
+                lon=event.lon,
+                north_shift=event.north_shift,
+                east_shift=event.east_shift,
+                depth=event.depth,
+                m6=mt.m6(),
+                time=event.time)
+        else:
+            source = gf.MTSource.from_pyrocko_event(event)
 
     if SourceType == "explosion":
         source = ExplosionSource(

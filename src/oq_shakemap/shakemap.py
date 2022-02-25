@@ -541,9 +541,8 @@ class Shakemap(object):
         if self.site_model.cross_antimeridian:
             lons[lons < 0] += 360.0
         lats = self.site_model["lat"].reshape(new_shape)
-        print(lats, lons, results)
         # Surpress plotting
-        plt.ioff()
+        #plt.ioff()
         fig = plt.figure()
         ax = fig.add_subplot(111)
         # Get the contours
@@ -566,9 +565,7 @@ class Shakemap(object):
                     contour_geometries.append(geometries[0])
                 contour_levels.append(level)
         plt.close(fig)
-        # Re-allow plotting
-        plt.ion()
-        # Create geodataframe
+
         dframe = gpd.GeoDataFrame(
             {imt: contour_levels, "geometry": gpd.GeoSeries(contour_geometries)}
         )

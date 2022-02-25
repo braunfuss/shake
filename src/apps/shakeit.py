@@ -7,6 +7,8 @@ from optparse import OptionParser
 from pyrocko import util
 import multiprocessing
 import shake
+import rasterio
+import numpy as num
 
 logger = logging.getLogger('main')
 
@@ -31,13 +33,16 @@ subcommand_descriptions = {
     'map-geometry': 'make station map',
     'snuffle': 'snuffle',
     'oq_shakemap': 'oq_shakemap',
-    'fwd_shakemap': 'fwd_shakemap'
+    'fwd_shakemap': 'fwd_shakemap',
+    'combined_shakemap': 'combined_shakemap'
+
 }
 
 subcommand_usages = {
     'init': 'init',
     'oq_shakemap': 'oq_shakemap',
     'fwd_shakemap': 'fwd_shakemap',
+    'combined_shakemap': 'combined_shakemap',
     'search': 'search <configfile> [options]',
     'map-geometry': 'map-geometry <configfile> [options] <output.(png|pdf)',
     'snuffle': 'snuffle <configfile>',
@@ -242,13 +247,391 @@ def command_oq_shakemap(args):
             type=str,
             default=True,
             help="qml")
+        parser.add_option(
+            "--events",
+            dest="events",
+            type=str,
+            help="Pyrocko event file")
 
     export_folder = args[0]
+    util.ensuredir(export_folder)
+
+    parser, options, args = cl_parse("oq_shakemap", args, setup)
+    if options.qml is not True:
+        oq_shakemap.workflows.shakemaps_from_quakeml(options.qml,
+                                                     export_folder=export_folder)
+
+    if options.events:
+        from pyrocko.io import quakeml as q
+        from pyrocko import model
+        events = model.load_events(options.events)
+        event = events[0]
+        table = [(event.name, event.time, event.lat, event.lon, event.depth,
+                  event.magnitude)]
+        event_qml = q.QuakeML(
+            event_parameters=q.EventParameters(
+                public_id='quakeml:test/eventParameters/test',
+                event_list=[
+                    q.Event(
+                        preferred_origin_id='quakeml:test/origin/%s' % name,
+                        preferred_magnitude_id='quakeml:test/magnitude/%s' % name,
+                        public_id='quakeml:test/event/%s' % name,
+                        origin_list=[
+                            q.Origin(
+                                public_id='quakeml:test/origin/%s' % name,
+                                time=q.TimeQuantity(value=time),
+                                longitude=q.RealQuantity(value=lon),
+                                latitude=q.RealQuantity(value=lat),
+                                depth=q.RealQuantity(value=depth),
+                            ),
+                        ],
+                        magnitude_list=[
+                            q.Magnitude(
+                                public_id='quakeml:test/magnitude/%s' % name,
+                                origin_id='quakeml:test/origin/%s' % name,
+                                mag=q.RealQuantity(value=magnitude),
+                            )
+                        ],
+
+                    )
+                    for (name, time, lat, lon, depth, magnitude) in table
+                ]
+            )
+        )
+
+        event_qml.dump_xml(filename=export_folder+"/%s.qml" % event.time)
+        oq_shakemap.workflows.shakemaps_from_quakeml(export_folder+"/%s.qml" % event.time,
+                                                     export_folder=export_folder)
+
+
+
+def get_coords_from_geotiff(fname, array):
+    with rasterio.open(fname) as r:
+        T0 = r.transform  # upper-left pixel corner affine transform
+    cols, rows = num.meshgrid(num.arange(array.shape[1]),
+                              num.arange(array.shape[0]))
+    T1 = T0 * Affine.translation(0.5, 0.5)
+    rc2en = lambda r, c: (c, r) * T1
+    eastings, northings = num.vectorize(rc2en,
+                                        otypes=[num.float, num.float])(rows, cols)
+    return eastings, northings
+
+
+def to_latlon(fname):
+    import rasterio
+    import numpy as np
+    from affine import Affine
+    from pyproj import Proj, transform
+
+    # Read raster
+    with rasterio.open(fname) as r:
+        T0 = r.transform  # upper-left pixel corner affine transform
+        p1 = Proj(r.crs)
+        A = r.read()  # pixel values
+
+    # All rows and columns
+    cols, rows = num.meshgrid(num.arange(A.shape[2]), num.arange(A.shape[1]))
+
+    # Get affine transform for pixel centres
+    T1 = T0 * Affine.translation(0.5, 0.5)
+    # Function to convert pixel row/column index (from 0) to easting/northing at centre
+    rc2en = lambda r, c: (c, r) * T1
+
+    # All eastings and northings (there is probably a faster way to do this)
+    eastings, northings = num.vectorize(rc2en, otypes=[num.float, num.float])(rows, cols)
+
+    # Project all longitudes, latitudes
+    p2 = Proj(proj='latlong', datum='WGS84')
+    longs, lats = transform(p1, p2, eastings, northings)
+    return longs, lats
+
+
+def command_combined_shakemap(args):
+    def setup(parser):
+        parser.add_option(
+            "--wanted_start",
+            dest="wanted_start",
+            type=int,
+            default=0,
+            help="number of events to create (default: %default)",
+        )
+        parser.add_option(
+            "--wanted_end",
+            dest="wanted_end",
+            type=int,
+            default=1,
+            help="number of events to create (default: %default)",
+        )
+        parser.add_option(
+            "--stations_file",
+            dest="stations_file",
+            type=str,
+            default="stations.raw.txt",
+            help="maximum depth (default: %default)",
+        )
+        parser.add_option(
+            "--store_id",
+            dest="store_id",
+            type=str,
+            default="insheim_100hz",
+            help="maximum depth (default: %default)",
+        )
+        parser.add_option(
+            "--store_ids",
+            dest="store_ids",
+            help="Comma-separated list of directories containing GF stores",
+        )
+        parser.add_option(
+            "--measured",
+            dest="measured",
+            type=str,
+            default=None,
+            help="maximum depth (default: %default)",
+        )
+        parser.add_option(
+            "--scenario",
+            dest="scenario",
+            type=str,
+            default=False,
+            help="maximum depth (default: %default)",
+        )
+        parser.add_option(
+            "--force",
+            dest="force",
+            action="store_true",
+            help="overwrite existing project folder.",
+        )
+        parser.add_option(
+            "--pertub_velocity_model",
+            dest="pertub_velocity_model",
+            type=str,
+            default=False,
+            help="pertub_velocity_model.",
+        )
+        parser.add_option(
+            "--pertub_mechanism",
+            dest="pertub_mechanism",
+            type=str,
+            default=False,
+            help="pertub_mechanism",
+        )
+        parser.add_option(
+            "--gf-store-superdirs",
+            dest="gf_store_superdirs",
+            help="Comma-separated list of directories containing GF stores",
+        )
+        parser.add_option(
+            "--n_pertub",
+            dest="n_pertub",
+            type=int,
+            default=0,
+            help="number of pertubations to create (default: %default)",
+        )
+        parser.add_option(
+            "--pertub_degree",
+            dest="pertub_degree",
+            type=float,
+            default=20,
+            help="number of pertubations to create (default: %default)",
+        )
+        parser.add_option(
+            "--pgv_outline",
+            dest="value_level",
+            type=float,
+            default=0.005,
+            help="Outline of certain PGV value (default: %default)",
+        )
+        parser.add_option(
+            "--extent",
+            dest="extent",
+            type=float,
+            default=30,
+            help="Outline of certain PGV value (default: %default)",
+        )
+        parser.add_option(
+            "--strike",
+            dest="strike",
+            type=float,
+            default=None,
+            help="Outline of certain PGV value (default: %default)",
+        )
+        parser.add_option(
+            "--dip",
+            dest="dip",
+            type=float,
+            default=None,
+            help="Outline of certain PGV value (default: %default)",)
+        parser.add_option(
+            "--rake",
+            dest="rake",
+            type=float,
+            default=None,
+            help="Outline of certain PGV value (default: %default)",)
+        parser.add_option(
+            "--moment",
+            dest="moment",
+            type=float,
+            default=None,
+            help="Outline of certain PGV value (default: %default)",)
+        parser.add_option(
+            "--depth",
+            dest="depth",
+            type=float,
+            default=None,
+            help="Outline of certain PGV value (default: %default)",)
+        parser.add_option(
+            "--source_type",
+            dest="source_type",
+            type=str,
+            default="MT",
+            help="Source Type (default: %default)",)
+        parser.add_option(
+            "--stations_corrections_file",
+            dest="stations_corrections_file",
+            type=str,
+            default=None,
+            help="stations_corrections_file",)
+        parser.add_option(
+            "--vs30_topo",
+            dest="vs30_topo",
+            type=str,
+            default=False,
+            help="Vs30 from topography",)
+        parser.add_option(
+            "--plot_directivity",
+            dest="plot_directivity",
+            type=str,
+            default=False,
+            help="plot directivity instead of shakemap",)
+        parser.add_option(
+            "--events",
+            dest="events",
+            type=str,
+            help="Pyrocko event file")
+        parser.add_option(
+            "--qml",
+            dest="qml",
+            type=str,
+            default=True,
+            help="qml")
+
+    from shake import oq_shakemap
+    export_folder = args[0]
+    util.ensuredir(export_folder)
+
     parser, options, args = cl_parse("oq_shakemap", args, setup)
 
     if options.qml is not True:
         oq_shakemap.workflows.shakemaps_from_quakeml(options.qml,
                                                      export_folder=export_folder)
+
+    if options.events:
+        from pyrocko.io import quakeml as q
+        from pyrocko import model
+        events = model.load_events(options.events)
+        event = events[0]
+
+        table = [(event.name, event.time, event.lat, event.lon, event.depth,
+                  event.magnitude)]
+
+        event_qml = q.QuakeML(
+            event_parameters=q.EventParameters(
+                public_id='quakeml:test/eventParameters/test',
+                event_list=[
+                    q.Event(
+                        preferred_origin_id='quakeml:test/origin/%s' % name,
+                        preferred_magnitude_id='quakeml:test/magnitude/%s' % name,
+                        public_id='quakeml:test/event/%s' % name,
+                        origin_list=[
+                            q.Origin(
+                                public_id='quakeml:test/origin/%s' % name,
+                                time=q.TimeQuantity(value=time),
+                                longitude=q.RealQuantity(value=lon),
+                                latitude=q.RealQuantity(value=lat),
+                                depth=q.RealQuantity(value=depth),
+                            ),
+                        ],
+                        magnitude_list=[
+                            q.Magnitude(
+                                public_id='quakeml:test/magnitude/%s' % name,
+                                origin_id='quakeml:test/origin/%s' % name,
+                                mag=q.RealQuantity(value=magnitude),
+                            )
+                        ],
+
+                    )
+                    for (name, time, lat, lon, depth, magnitude) in table
+                ]
+            )
+        )
+
+        event_qml.dump_xml(filename=export_folder+"/%s.qml" % event.time)
+        results = oq_shakemap.workflows.shakemaps_from_quakeml(export_folder+"/%s.qml" % event.time,
+                                                     export_folder=export_folder, vs30_topo=False)
+
+    # p = results.contours["mean"]["PGA"].values.tolist()
+    # geometries = []
+    # for ps in p:
+    #     line = ps[1]
+    #     geometries.append(line.coords.xy)
+
+    fname = "groebers/groebers_PGA_mean.tif"
+    comb = rasterio.open(fname)
+    longs, lats = to_latlon(fname)
+    geometries = comb.read(1)
+    geometries = (longs, lats, geometries)
+
+    results = oq_shakemap.workflows.shakemaps_from_quakeml(export_folder+"/%s.qml" % event.time,
+                                                 export_folder=export_folder, vs30_topo=True)
+
+    fname = "groebers/groebers_PGA_mean.tif"
+    comb = rasterio.open(fname)
+    longs, lats = to_latlon(fname)
+    geometries_vs30 = comb.read(1)
+    geometries_vs30 = (longs, lats, geometries_vs30)
+
+    gf_store_superdirs = None
+    if options.gf_store_superdirs:
+        gf_store_superdirs = options.gf_store_superdirs.split(",")
+    else:
+        gf_store_superdirs = None
+    if options.measured is not None:
+        options.measured = True
+    if options.scenario is not False:
+        options.scenario = True
+    if options.plot_directivity is not False:
+        options.plot_directivity = True
+    if options.vs30_topo is not False:
+        options.vs30_topo = True
+    project_dir = args[0]
+    from matplotlib import pyplot as plt
+    from shake import syn_shake
+    if options.store_ids:
+        store_ids = options.store_ids.split(',')
+    print(store_ids)
+    scenario = syn_shake.fwd_shakemap_post(
+                project_dir,
+                wanted_start=options.wanted_start,
+                store_ids=store_ids,
+                gf_store_superdirs=options.gf_store_superdirs,
+                pertub_degree=options.pertub_degree,
+                n_pertub=options.n_pertub,
+                value_level=options.value_level,
+                pertub_velocity_model=options.pertub_velocity_model,
+                pertub_mechanism=options.pertub_mechanism,
+                measured=options.measured,
+                strike=options.strike,
+                dip=options.dip,
+                rake=options.rake,
+                moment=options.moment,
+                depth=options.depth,
+                source_type=options.source_type,
+                vs30_topo=options.vs30_topo,
+                plot_directivity=options.plot_directivity,
+                stations_corrections_file=options.stations_corrections_file,
+                geometries=geometries,
+                geometries_vs30=geometries_vs30,
+                extent=options.extent)
 
 
 def command_fwd_shakemap(args):
@@ -336,6 +719,13 @@ def command_fwd_shakemap(args):
             help="Outline of certain PGV value (default: %default)",
         )
         parser.add_option(
+            "--extent",
+            dest="extent",
+            type=float,
+            default=30,
+            help="Outline of certain PGV value (default: %default)",
+        )
+        parser.add_option(
             "--strike",
             dest="strike",
             type=float,
@@ -410,7 +800,6 @@ def command_fwd_shakemap(args):
     scenario = syn_shake.fwd_shakemap_post(
                 project_dir,
                 wanted_start=options.wanted_start,
-                wanted_end=options.wanted_end,
                 store_id=options.store_id,
                 gf_store_superdirs=options.gf_store_superdirs,
                 pertub_degree=options.pertub_degree,
@@ -426,7 +815,8 @@ def command_fwd_shakemap(args):
                 source_type=options.source_type,
                 vs30_topo=options.vs30_topo,
                 plot_directivity=options.plot_directivity,
-                stations_corrections_file=options.stations_corrections_file)
+                stations_corrections_file=options.stations_corrections_file,
+                extent=options.extent)
 
 
 def command_search(args):

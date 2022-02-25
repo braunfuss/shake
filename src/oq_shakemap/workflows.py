@@ -131,6 +131,7 @@ def shakemaps_from_quakeml(
     cache_file: Optional[str] = None,
     contour_levels_mean: Union[int, List] = 10,
     contour_levels_stddev: Union[int, List] = 10,
+    vs30_topo=True,
     regionalization: RegionalizationSet = DEFAULT_GLOBAL_REGIONALIZATION,
 ) -> Tuple[Dict, Dict]:
     """
@@ -154,10 +155,6 @@ def shakemaps_from_quakeml(
     """
     if not config:
         config = DEFAULT_CONFIGURATION
-    if export_folder:
-        if os.path.exists(export_folder):
-            raise IOError("Designated export folder %s already exists!" % export_folder)
-        os.mkdir(export_folder)
 
     # Create the event from the GEOFON event ID (or the path to the QuakeML file)
     results = ShakemapWorkflowResult()
@@ -182,6 +179,23 @@ def shakemaps_from_quakeml(
     # Build the site model
     bbox = results.earthquake.get_maximum_distance_bbox(bbox_config["max_distance_bbox"])
     vs30 = site_config.pop("default_vs30")
+
+    if vs30_topo is True:
+        from shake.util import vs30
+        from scipy import ndimage
+        values_vs30 = vs30.extract_rectangle(bbox[0],
+                                             bbox[2],
+                                             bbox[1],
+                                             bbox[3])
+
+        f1 = (int((bbox[3]-bbox[1])/ bbox_config["spcx"]))+2
+        f2 = (int((bbox[2]-bbox[0])/ bbox_config["spcy"]))+2
+
+        factor_x = f1/np.shape(values_vs30)[0]
+        factor_y = f2/np.shape(values_vs30)[1]
+
+        vs30 = ndimage.zoom(values_vs30, (factor_x, factor_y))
+        vs30 = vs30.flatten()
     site_model = SiteModel.from_bbox(
         bbox, bbox_config["spcx"], bbox_config["spcy"], vs30, **site_config
     )
@@ -229,12 +243,12 @@ def shakemaps_from_quakeml(
             results.shakemaps["stddevs"][imt] = shakemap.to_geotiff(
                 stddev_mmi, imt, is_stddev=True
             )
-            results.contours["mean"][imt] = shakemap.get_contours(
-                imt, mmi, np.arange(1, 11, 1), is_stddev=True
-            )
-            results.contours["stddevs"][imt] = shakemap.get_contours(
-                imt, stddev_mmi, contour_levels_stddev, is_stddev=True
-            )
+            # results.contours["mean"][imt] = shakemap.get_contours(
+            #     imt, mmi, np.arange(1, 11, 1), is_stddev=True
+            # )
+            # results.contours["stddevs"][imt] = shakemap.get_contours(
+            #     imt, stddev_mmi, contour_levels_stddev, is_stddev=True
+            # )
             # Retrieve summary statistics - not in logarithmic domain
             results.statistics["mean"][imt] = {
                 "maximum": np.max(mmi[imt]),
@@ -271,12 +285,12 @@ def shakemaps_from_quakeml(
                 f.write(results.shakemaps["stddevs"][imt])
             # Export the contour dataframes to geojson
             fname_contour_mean = os.path.join(export_folder, filestem + "_contour_mean.geojson")
-            results.contours["mean"][imt].to_file(fname_contour_mean, driver="GeoJSON")
-            if results.contours["stddevs"][imt].shape[0]:
-                # If all the sites have the same standard deviation then skip this as the
-                # contours will yield an empty dataframe
-                fname_contour_stddev = os.path.join(
-                    export_folder, filestem + "_contour_stddev.geojson"
-                )
-                results.contours["stddevs"][imt].to_file(fname_contour_stddev, driver="GeoJSON")
+            # results.contours["mean"][imt].to_file(fname_contour_mean, driver="GeoJSON")
+            # if results.contours["stddevs"][imt].shape[0]:
+            #     # If all the sites have the same standard deviation then skip this as the
+            #     # contours will yield an empty dataframe
+            #     fname_contour_stddev = os.path.join(
+            #         export_folder, filestem + "_contour_stddev.geojson"
+            #     )
+            #     results.contours["stddevs"][imt].to_file(fname_contour_stddev, driver="GeoJSON")
     return results
